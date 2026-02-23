@@ -1,0 +1,20 @@
+apiVersion: config.metal.ironcore.dev/v1alpha1
+kind: SecretBackendConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: bmc-secret-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: vault-token-config
+spec:
+  backend: vault
+  vaultConfig:
+    address: "https://vault.example.com:8200"
+    authMethod: token
+    tokenAuth:
+      secretRef:
+        name: vault-token
+        namespace: bmc-secret-operator-system
+        key: token
+    mountPath: secret
+  pathTemplate: "bmc/{{.Region}}/{{.Hostname}}/{{.Username}}"
+  regionLabelKey: "region"
