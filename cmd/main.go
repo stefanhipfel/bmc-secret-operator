@@ -199,6 +199,7 @@ func main() {
 	}()
 
 	// Setup BMCSecret controller
+	//nolint:staticcheck // TODO: migrate to new events API
 	if err = (&controller.BMCSecretReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
@@ -211,6 +212,7 @@ func main() {
 	}
 
 	// Setup SecretBackendConfig controller to watch for configuration changes
+	//nolint:staticcheck // TODO: migrate to new events API
 	if err = (&controller.SecretBackendConfigReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),

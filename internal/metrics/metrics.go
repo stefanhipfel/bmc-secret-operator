@@ -17,6 +17,7 @@ limitations under the License.
 package metrics
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,6 +27,11 @@ import (
 const (
 	resultSuccess = "success"
 	resultError   = "error"
+)
+
+var (
+	once     sync.Once
+	instance *Collector
 )
 
 // Collector holds all Prometheus metrics for the BMC secret operator
@@ -52,130 +58,133 @@ type Collector struct {
 	credentialExtraction *prometheus.CounterVec
 }
 
-// NewCollector creates and registers all metrics
+// NewCollector creates and registers all metrics (singleton pattern)
 func NewCollector() *Collector {
-	return &Collector{
-		// Reconciliation duration by operation type
-		reconcileDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "bmcsecret_reconcile_duration_seconds",
-				Help:    "Duration of BMCSecret reconciliation operations in seconds",
-				Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
-			},
-			[]string{"operation"},
-		),
+	once.Do(func() {
+		instance = &Collector{
+			// Reconciliation duration by operation type
+			reconcileDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "bmcsecret_reconcile_duration_seconds",
+					Help:    "Duration of BMCSecret reconciliation operations in seconds",
+					Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+				},
+				[]string{"operation"},
+			),
 
-		// Reconciliation attempts by result
-		reconcileTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "bmcsecret_reconcile_total",
-				Help: "Total number of BMCSecret reconciliation attempts",
-			},
-			[]string{"result"},
-		),
+			// Reconciliation attempts by result
+			reconcileTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "bmcsecret_reconcile_total",
+					Help: "Total number of BMCSecret reconciliation attempts",
+				},
+				[]string{"result"},
+			),
 
-		// Number of BMCs discovered per secret
-		bmcCount: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "bmcsecret_bmc_count",
-				Help: "Number of BMCs discovered for each BMCSecret",
-			},
-			[]string{"secret"},
-		),
+			// Number of BMCs discovered per secret
+			bmcCount: promauto.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name: "bmcsecret_bmc_count",
+					Help: "Number of BMCs discovered for each BMCSecret",
+				},
+				[]string{"secret"},
+			),
 
-		// Successful sync paths per secret
-		syncSuccessPaths: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "bmcsecret_sync_success_paths",
-				Help: "Number of successfully synced backend paths per BMCSecret",
-			},
-			[]string{"secret"},
-		),
+			// Successful sync paths per secret
+			syncSuccessPaths: promauto.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name: "bmcsecret_sync_success_paths",
+					Help: "Number of successfully synced backend paths per BMCSecret",
+				},
+				[]string{"secret"},
+			),
 
-		// Failed sync paths per secret
-		syncFailedPaths: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "bmcsecret_sync_failed_paths",
-				Help: "Number of failed backend paths per BMCSecret",
-			},
-			[]string{"secret"},
-		),
+			// Failed sync paths per secret
+			syncFailedPaths: promauto.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name: "bmcsecret_sync_failed_paths",
+					Help: "Number of failed backend paths per BMCSecret",
+				},
+				[]string{"secret"},
+			),
 
-		// Last successful sync timestamp
-		syncLastSuccessTime: promauto.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "bmcsecret_sync_last_success_timestamp",
-				Help: "Timestamp of last successful sync per BMCSecret (Unix time)",
-			},
-			[]string{"secret"},
-		),
+			// Last successful sync timestamp
+			syncLastSuccessTime: promauto.NewGaugeVec(
+				prometheus.GaugeOpts{
+					Name: "bmcsecret_sync_last_success_timestamp",
+					Help: "Timestamp of last successful sync per BMCSecret (Unix time)",
+				},
+				[]string{"secret"},
+			),
 
-		// Backend operation duration
-		backendOpDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "bmcsecret_backend_operation_duration_seconds",
-				Help:    "Duration of backend operations in seconds",
-				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
-			},
-			[]string{"operation", "backend_type"},
-		),
+			// Backend operation duration
+			backendOpDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "bmcsecret_backend_operation_duration_seconds",
+					Help:    "Duration of backend operations in seconds",
+					Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5},
+				},
+				[]string{"operation", "backend_type"},
+			),
 
-		// Backend operation counts
-		backendOpTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "bmcsecret_backend_operation_total",
-				Help: "Total number of backend operations",
-			},
-			[]string{"operation", "backend_type", "result"},
-		),
+			// Backend operation counts
+			backendOpTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "bmcsecret_backend_operation_total",
+					Help: "Total number of backend operations",
+				},
+				[]string{"operation", "backend_type", "result"},
+			),
 
-		// Backend errors by type
-		backendErrorsTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "bmcsecret_backend_errors_total",
-				Help: "Total number of backend errors by error type",
-			},
-			[]string{"operation", "backend_type", "error_type"},
-		),
+			// Backend errors by type
+			backendErrorsTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "bmcsecret_backend_errors_total",
+					Help: "Total number of backend errors by error type",
+				},
+				[]string{"operation", "backend_type", "error_type"},
+			),
 
-		// Authentication operation duration
-		backendAuthDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "bmcsecret_backend_auth_duration_seconds",
-				Help:    "Duration of backend authentication operations in seconds",
-				Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
-			},
-			[]string{"method", "backend_type"},
-		),
+			// Authentication operation duration
+			backendAuthDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "bmcsecret_backend_auth_duration_seconds",
+					Help:    "Duration of backend authentication operations in seconds",
+					Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0},
+				},
+				[]string{"method", "backend_type"},
+			),
 
-		// Authentication attempt counts
-		backendAuthTotal: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "bmcsecret_backend_auth_total",
-				Help: "Total number of backend authentication attempts",
-			},
-			[]string{"method", "backend_type", "result"},
-		),
+			// Authentication attempt counts
+			backendAuthTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "bmcsecret_backend_auth_total",
+					Help: "Total number of backend authentication attempts",
+				},
+				[]string{"method", "backend_type", "result"},
+			),
 
-		// BMC discovery duration
-		bmcDiscoveryDuration: promauto.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name:    "bmcsecret_bmc_discovery_duration_seconds",
-				Help:    "Duration of BMC discovery operations in seconds",
-				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0},
-			},
-			[]string{"secret"},
-		),
+			// BMC discovery duration
+			bmcDiscoveryDuration: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "bmcsecret_bmc_discovery_duration_seconds",
+					Help:    "Duration of BMC discovery operations in seconds",
+					Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0},
+				},
+				[]string{"secret"},
+			),
 
-		// Credential extraction results
-		credentialExtraction: promauto.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "bmcsecret_credential_extraction_total",
-				Help: "Total number of credential extraction attempts",
-			},
-			[]string{"secret", "result"},
-		),
-	}
+			// Credential extraction results
+			credentialExtraction: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "bmcsecret_credential_extraction_total",
+					Help: "Total number of credential extraction attempts",
+				},
+				[]string{"secret", "result"},
+			),
+		}
+	})
+	return instance
 }
 
 // RecordReconcileDuration records the duration of a reconciliation operation
