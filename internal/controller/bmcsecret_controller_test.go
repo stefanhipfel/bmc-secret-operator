@@ -37,6 +37,10 @@ import (
 	"github.com/ironcore-dev/bmc-secret-operator/internal/controller/mock"
 )
 
+const (
+	testBMCHostname = "bmc-server1.example.com"
+)
+
 func TestBMCSecretController(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "BMCSecret Controller Suite")
@@ -87,7 +91,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc-1",
@@ -212,7 +216,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -263,7 +267,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -340,7 +344,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -514,7 +518,7 @@ var _ = Describe("BMCSecret Controller", func() {
 		})
 
 		It("Should not update backend if password is unchanged", func() {
-			err := mockBackend.WriteSecret(ctx, "bmc/us-east-1/bmc-server1.example.com/admin", map[string]interface{}{
+			err := mockBackend.WriteSecret(ctx, "bmc/us-east-1/bmc-server1.example.com/admin", map[string]any{
 				"username": "admin",
 				"password": "secret123",
 			})
@@ -530,7 +534,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -568,7 +572,7 @@ var _ = Describe("BMCSecret Controller", func() {
 		})
 
 		It("Should update backend when password changes", func() {
-			err := mockBackend.WriteSecret(ctx, "bmc/us-east-1/bmc-server1.example.com/admin", map[string]interface{}{
+			err := mockBackend.WriteSecret(ctx, "bmc/us-east-1/bmc-server1.example.com/admin", map[string]any{
 				"username": "admin",
 				"password": "oldpassword",
 			})
@@ -584,7 +588,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -656,7 +660,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",
@@ -718,7 +722,7 @@ var _ = Describe("BMCSecret Controller", func() {
 				},
 			}
 
-			hostname := "bmc-server1.example.com"
+			hostname := testBMCHostname
 			bmc := &metalv1alpha1.BMC{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-bmc",

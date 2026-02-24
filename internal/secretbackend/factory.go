@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	configv1alpha1 "github.com/ironcore-dev/bmc-secret-operator/api/v1alpha1"
 	"github.com/ironcore-dev/bmc-secret-operator/internal/secretbackend/vault"
@@ -33,17 +34,25 @@ const (
 
 // BackendFactory manages backend instances
 type BackendFactory struct {
-	client      client.Client
-	backend     Backend
-	pathBuilder *PathBuilder
-	config      *Config
-	mu          sync.RWMutex
+	client           client.Client
+	backend          Backend
+	pathBuilder      *PathBuilder
+	config           *Config
+	metricsCollector MetricsCollector
+	mu               sync.RWMutex
+}
+
+// MetricsCollector defines the interface for recording metrics
+// This allows the factory to be independent of the metrics implementation
+type MetricsCollector interface {
+	RecordAuth(method, backendType string, duration time.Duration, err error)
 }
 
 // NewBackendFactory creates a new backend factory
-func NewBackendFactory(c client.Client) (*BackendFactory, error) {
+func NewBackendFactory(c client.Client, metricsCollector MetricsCollector) (*BackendFactory, error) {
 	return &BackendFactory{
-		client: c,
+		client:           c,
+		metricsCollector: metricsCollector,
 	}, nil
 }
 
@@ -179,8 +188,11 @@ func (f *BackendFactory) loadConfig(ctx context.Context) (*Config, error) {
 
 // createBackend creates a backend instance based on configuration
 func (f *BackendFactory) createBackend(config *Config) (Backend, error) {
+	var backend Backend
+	var err error
+
 	switch config.Backend {
-	case "vault":
+	case defaultBackendType:
 		if config.VaultConfig == nil {
 			return nil, fmt.Errorf("vault configuration is required when backend is vault")
 		}
@@ -195,7 +207,7 @@ func (f *BackendFactory) createBackend(config *Config) (Backend, error) {
 			SkipVerify:         config.VaultConfig.SkipVerify,
 			CACert:             config.VaultConfig.CACert,
 		}
-		return vault.NewVaultBackend(vaultConfig)
+		backend, err = vault.NewVaultBackend(vaultConfig, f.metricsCollector)
 
 	case "openbao":
 		return nil, fmt.Errorf("OpenBao backend not yet implemented")
@@ -203,6 +215,94 @@ func (f *BackendFactory) createBackend(config *Config) (Backend, error) {
 	default:
 		return nil, fmt.Errorf("unsupported backend type: %s", config.Backend)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap backend with metrics instrumentation if metrics collector is available
+	if f.metricsCollector != nil {
+		backend = newInstrumentedBackend(backend, config.Backend, f.metricsCollector)
+	}
+
+	return backend, nil
+}
+
+// newInstrumentedBackend wraps a backend with metrics instrumentation
+func newInstrumentedBackend(backend Backend, backendType string, collector MetricsCollector) Backend {
+	return &instrumentedBackend{
+		backend:     backend,
+		backendType: backendType,
+		collector:   collector,
+	}
+}
+
+// instrumentedBackend wraps a Backend with metrics instrumentation
+type instrumentedBackend struct {
+	backend     Backend
+	backendType string
+	collector   MetricsCollector
+}
+
+// WriteSecret writes a secret and records metrics
+func (i *instrumentedBackend) WriteSecret(ctx context.Context, path string, data map[string]any) error {
+	start := time.Now()
+	err := i.backend.WriteSecret(ctx, path, data)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("write", i.backendType, duration, err)
+	}
+	return err
+}
+
+// ReadSecret reads a secret and records metrics
+func (i *instrumentedBackend) ReadSecret(ctx context.Context, path string) (map[string]any, error) {
+	start := time.Now()
+	data, err := i.backend.ReadSecret(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("read", i.backendType, duration, err)
+	}
+	return data, err
+}
+
+// DeleteSecret deletes a secret and records metrics
+func (i *instrumentedBackend) DeleteSecret(ctx context.Context, path string) error {
+	start := time.Now()
+	err := i.backend.DeleteSecret(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("delete", i.backendType, duration, err)
+	}
+	return err
+}
+
+// SecretExists checks if a secret exists and records metrics
+func (i *instrumentedBackend) SecretExists(ctx context.Context, path string) (bool, error) {
+	start := time.Now()
+	exists, err := i.backend.SecretExists(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("exists", i.backendType, duration, err)
+	}
+	return exists, err
+}
+
+// Close closes the backend
+func (i *instrumentedBackend) Close() error {
+	return i.backend.Close()
 }
 
 // Close closes the backend and cleans up resources

@@ -44,29 +44,29 @@ type SecretBackendConfigReconciler struct {
 
 // Reconcile handles SecretBackendConfig changes
 func (r *SecretBackendConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	// Fetch the SecretBackendConfig
 	var config configv1alpha1.SecretBackendConfig
 	if err := r.Get(ctx, req.NamespacedName, &config); err != nil {
 		if errors.IsNotFound(err) {
 			// Config was deleted - operator will fall back to environment variables
-			log.Info("SecretBackendConfig deleted, invalidating cache")
+			logger.Info("SecretBackendConfig deleted, invalidating cache")
 			if err := r.BackendFactory.InvalidateCache(); err != nil {
-				log.Error(err, "Failed to invalidate backend cache")
+				logger.Error(err, "Failed to invalidate backend cache")
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get SecretBackendConfig")
+		logger.Error(err, "Failed to get SecretBackendConfig")
 		return ctrl.Result{}, err
 	}
 
-	log.Info("SecretBackendConfig changed, invalidating cache")
+	logger.Info("SecretBackendConfig changed, invalidating cache")
 
 	// Invalidate the backend factory cache
 	if err := r.BackendFactory.InvalidateCache(); err != nil {
-		log.Error(err, "Failed to invalidate backend cache")
+		logger.Error(err, "Failed to invalidate backend cache")
 		return ctrl.Result{}, err
 	}
 
@@ -75,7 +75,7 @@ func (r *SecretBackendConfigReconciler) Reconcile(ctx context.Context, req ctrl.
 	// or when BMC/BMCSecret resources are updated
 	// The cache invalidation ensures the next reconciliation uses the new configuration
 
-	log.Info("Successfully invalidated cache - new config will be used on next reconciliation")
+	logger.Info("Successfully invalidated cache - new config will be used on next reconciliation")
 	r.Recorder.Event(&config, "Normal", "ConfigReloaded", "Configuration cache invalidated, new settings will be applied on next sync")
 
 	return ctrl.Result{}, nil

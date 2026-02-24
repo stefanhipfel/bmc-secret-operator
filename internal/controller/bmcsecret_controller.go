@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ironcore-dev/bmc-secret-operator/internal/controller/bmcresolver"
+	"github.com/ironcore-dev/bmc-secret-operator/internal/metrics"
 	"github.com/ironcore-dev/bmc-secret-operator/internal/secretbackend"
 )
 
@@ -44,6 +45,9 @@ const (
 	bmcSecretFinalizer = "bmcsecret.metal.ironcore.dev/backend-cleanup"
 	requeueAfterNormal = 5 * time.Minute
 	requeueAfterError  = 30 * time.Second
+
+	reconcileResultSuccess = "success"
+	reconcileResultError   = "error"
 )
 
 // BMCSecretReconciler reconciles a BMCSecret object
@@ -52,6 +56,7 @@ type BMCSecretReconciler struct {
 	Scheme         *runtime.Scheme
 	Recorder       record.EventRecorder
 	BackendFactory secretbackend.BackendFactoryInterface
+	Metrics        *metrics.Collector
 }
 
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcsecrets,verbs=get;list;watch
@@ -66,7 +71,22 @@ type BMCSecretReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
+
+	startTime := time.Now()
+	var reconcileErr error
+
+	defer func() {
+		if r.Metrics != nil {
+			duration := time.Since(startTime)
+			r.Metrics.RecordReconcileDuration("reconcile", duration)
+			reconcileResult := reconcileResultSuccess
+			if reconcileErr != nil {
+				reconcileResult = reconcileResultError
+			}
+			r.Metrics.RecordReconcileResult(reconcileResult)
+		}
+	}()
 
 	// Fetch the BMCSecret
 	var bmcSecret metalv1alpha1.BMCSecret
@@ -74,21 +94,23 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get BMCSecret")
+		logger.Error(err, "Failed to get BMCSecret")
+		reconcileErr = err
 		return ctrl.Result{}, err
 	}
 
 	// Check if secret should be synced based on label
 	syncLabel, err := r.BackendFactory.GetSyncLabel(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get sync label configuration")
+		logger.Error(err, "Failed to get sync label configuration")
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
 	// If sync label is configured, check if the BMCSecret has it
 	if syncLabel != "" {
 		if bmcSecret.Labels == nil || bmcSecret.Labels[syncLabel] == "" {
-			log.V(1).Info("BMCSecret does not have required sync label, skipping", "syncLabel", syncLabel)
+			logger.V(1).Info("BMCSecret does not have required sync label, skipping", "syncLabel", syncLabel)
 			return ctrl.Result{}, nil
 		}
 	}
@@ -102,7 +124,8 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !controllerutil.ContainsFinalizer(&bmcSecret, bmcSecretFinalizer) {
 		controllerutil.AddFinalizer(&bmcSecret, bmcSecretFinalizer)
 		if err := r.Update(ctx, &bmcSecret); err != nil {
-			log.Error(err, "Failed to add finalizer")
+			logger.Error(err, "Failed to add finalizer")
+			reconcileErr = err
 			return ctrl.Result{}, err
 		}
 	}
@@ -110,51 +133,63 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Discover BMCs that reference this secret
 	bmcs, err := bmcresolver.FindBMCsForSecret(ctx, r.Client, bmcSecret.Name)
 	if err != nil {
-		log.Error(err, "Failed to find BMCs for secret")
+		logger.Error(err, "Failed to find BMCs for secret")
 		r.Recorder.Event(&bmcSecret, "Warning", "BMCDiscoveryFailed", err.Error())
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
+	if r.Metrics != nil {
+		r.Metrics.RecordBMCCount(bmcSecret.Name, len(bmcs))
+	}
+
 	if len(bmcs) == 0 {
-		log.Info("No BMCs reference this secret")
+		logger.Info("No BMCs reference this secret")
 		r.Recorder.Event(&bmcSecret, "Normal", "NoBMCReference", "No BMCs reference this secret")
 		return ctrl.Result{RequeueAfter: requeueAfterNormal}, nil
 	}
 
 	// Extract credentials
 	username, password, err := bmcresolver.ExtractCredentials(&bmcSecret)
+	if r.Metrics != nil {
+		r.Metrics.RecordCredentialExtraction(bmcSecret.Name, err)
+	}
 	if err != nil {
-		log.Error(err, "Failed to extract credentials")
+		logger.Error(err, "Failed to extract credentials")
 		r.Recorder.Event(&bmcSecret, "Warning", "MissingCredentials", err.Error())
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
 	// Get backend
 	backend, err := r.BackendFactory.GetBackend(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get backend")
+		logger.Error(err, "Failed to get backend")
 		r.Recorder.Event(&bmcSecret, "Warning", "BackendUnavailable", err.Error())
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
 	// Get path builder
 	pathBuilder, err := r.BackendFactory.GetPathBuilder(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get path builder")
+		logger.Error(err, "Failed to get path builder")
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
 	// Get region label key
 	regionLabelKey, err := r.BackendFactory.GetRegionLabelKey(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get region label key")
+		logger.Error(err, "Failed to get region label key")
+		reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
 	// Sync secrets for each BMC and track status
 	syncErrors := 0
 	syncSuccess := 0
-	var backendPaths []configv1alpha1.BackendPath
+	backendPaths := make([]configv1alpha1.BackendPath, 0, len(bmcs))
 	syncTime := metav1.Now()
 
 	for _, bmc := range bmcs {
@@ -168,7 +203,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Username: username,
 		})
 		if err != nil {
-			log.Error(err, "Failed to build path", "bmc", bmc.Name)
+			logger.Error(err, "Failed to build path", "bmc", bmc.Name)
 			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 				Path:         path,
 				BMCName:      bmc.Name,
@@ -186,7 +221,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// Check if update needed
 		needsUpdate, err := r.needsUpdate(ctx, backend, path, password)
 		if err != nil {
-			log.Error(err, "Failed to check if update needed", "path", path)
+			logger.Error(err, "Failed to check if update needed", "path", path)
 			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 				Path:         path,
 				BMCName:      bmc.Name,
@@ -202,7 +237,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		if !needsUpdate {
-			log.V(1).Info("Secret already up to date", "path", path)
+			logger.V(1).Info("Secret already up to date", "path", path)
 			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 				Path:         path,
 				BMCName:      bmc.Name,
@@ -217,13 +252,13 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		// Write to backend
-		secretData := map[string]interface{}{
+		secretData := map[string]any{
 			"username": username,
 			"password": password,
 		}
 
 		if err := backend.WriteSecret(ctx, path, secretData); err != nil {
-			log.Error(err, "Failed to write secret to backend", "path", path)
+			logger.Error(err, "Failed to write secret to backend", "path", path)
 			r.Recorder.Eventf(&bmcSecret, "Warning", "SyncFailed", "Failed to sync to %s: %v", path, err)
 			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 				Path:         path,
@@ -239,7 +274,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			continue
 		}
 
-		log.Info("Successfully synced secret", "path", path)
+		logger.Info("Successfully synced secret", "path", path)
 		backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 			Path:         path,
 			BMCName:      bmc.Name,
@@ -254,7 +289,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Update BMCSecretSyncStatus
 	if err := r.updateSyncStatus(ctx, bmcSecret.Name, backendPaths, len(bmcs), syncSuccess, syncErrors); err != nil {
-		log.Error(err, "Failed to update sync status")
+		logger.Error(err, "Failed to update sync status")
 		// Don't fail reconciliation if status update fails
 	}
 
@@ -265,27 +300,38 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.Recorder.Eventf(&bmcSecret, "Normal", "Synced", "Successfully synced to %d backend paths", syncSuccess)
 	}
 
-	log.Info("Reconciliation complete", "syncSuccess", syncSuccess, "syncErrors", syncErrors, "totalBMCs", len(bmcs))
+	logger.Info("Reconciliation complete", "syncSuccess", syncSuccess, "syncErrors", syncErrors, "totalBMCs", len(bmcs))
+
+	if r.Metrics != nil {
+		r.Metrics.RecordSyncStatus(bmcSecret.Name, syncSuccess, syncErrors, syncTime.Time)
+	}
 
 	return ctrl.Result{RequeueAfter: requeueAfterNormal}, nil
 }
 
 // handleDeletion handles cleanup when BMCSecret is being deleted
 func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *metalv1alpha1.BMCSecret) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
+
+	start := time.Now()
+	defer func() {
+		if r.Metrics != nil {
+			r.Metrics.RecordReconcileDuration("deletion", time.Since(start))
+		}
+	}()
 
 	if !controllerutil.ContainsFinalizer(bmcSecret, bmcSecretFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
-	log.Info("Cleaning up backend secrets")
+	logger.Info("Cleaning up backend secrets")
 
 	// Delete corresponding BMCSecretSyncStatus
 	syncStatus := &configv1alpha1.BMCSecretSyncStatus{}
 	syncStatusName := fmt.Sprintf("%s-sync-status", bmcSecret.Name)
 	if err := r.Get(ctx, types.NamespacedName{Name: syncStatusName}, syncStatus); err == nil {
 		if err := r.Delete(ctx, syncStatus); err != nil && !errors.IsNotFound(err) {
-			log.Error(err, "Failed to delete BMCSecretSyncStatus")
+			logger.Error(err, "Failed to delete BMCSecretSyncStatus")
 			// Continue with cleanup even if status deletion fails
 		}
 	}
@@ -293,7 +339,7 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 	// Get backend
 	backend, err := r.BackendFactory.GetBackend(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get backend during cleanup, allowing deletion to proceed")
+		logger.Error(err, "Failed to get backend during cleanup, allowing deletion to proceed")
 		r.Recorder.Event(bmcSecret, "Warning", "CleanupFailed", "Backend unavailable during cleanup")
 		// Allow deletion to proceed even if backend is unavailable
 		controllerutil.RemoveFinalizer(bmcSecret, bmcSecretFinalizer)
@@ -306,7 +352,7 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 	// Get path builder and region label key
 	pathBuilder, err := r.BackendFactory.GetPathBuilder(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get path builder during cleanup")
+		logger.Error(err, "Failed to get path builder during cleanup")
 		// Continue with deletion
 		controllerutil.RemoveFinalizer(bmcSecret, bmcSecretFinalizer)
 		if err := r.Update(ctx, bmcSecret); err != nil {
@@ -317,7 +363,7 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 
 	regionLabelKey, err := r.BackendFactory.GetRegionLabelKey(ctx)
 	if err != nil {
-		log.Error(err, "Failed to get region label key during cleanup")
+		logger.Error(err, "Failed to get region label key during cleanup")
 		// Continue with deletion
 		controllerutil.RemoveFinalizer(bmcSecret, bmcSecretFinalizer)
 		if err := r.Update(ctx, bmcSecret); err != nil {
@@ -329,7 +375,7 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 	// Extract credentials
 	username, _, err := bmcresolver.ExtractCredentials(bmcSecret)
 	if err != nil {
-		log.Error(err, "Failed to extract credentials during cleanup, proceeding with deletion")
+		logger.Error(err, "Failed to extract credentials during cleanup, proceeding with deletion")
 		controllerutil.RemoveFinalizer(bmcSecret, bmcSecretFinalizer)
 		if err := r.Update(ctx, bmcSecret); err != nil {
 			return ctrl.Result{}, err
@@ -340,7 +386,7 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 	// Find associated BMCs
 	bmcs, err := bmcresolver.FindBMCsForSecret(ctx, r.Client, bmcSecret.Name)
 	if err != nil {
-		log.Error(err, "Failed to find BMCs during cleanup")
+		logger.Error(err, "Failed to find BMCs during cleanup")
 		// Continue with deletion
 		controllerutil.RemoveFinalizer(bmcSecret, bmcSecretFinalizer)
 		if err := r.Update(ctx, bmcSecret); err != nil {
@@ -360,17 +406,17 @@ func (r *BMCSecretReconciler) handleDeletion(ctx context.Context, bmcSecret *met
 			Username: username,
 		})
 		if err != nil {
-			log.Error(err, "Failed to build path during cleanup", "bmc", bmc.Name)
+			logger.Error(err, "Failed to build path during cleanup", "bmc", bmc.Name)
 			continue
 		}
 
 		if err := backend.DeleteSecret(ctx, path); err != nil {
-			log.Error(err, "Failed to delete secret from backend", "path", path)
+			logger.Error(err, "Failed to delete secret from backend", "path", path)
 			// Continue with other deletions
 			continue
 		}
 
-		log.Info("Deleted secret from backend", "path", path)
+		logger.Info("Deleted secret from backend", "path", path)
 	}
 
 	// Remove finalizer
@@ -455,7 +501,7 @@ func (r *BMCSecretReconciler) findBMCSecretsForBMC(ctx context.Context, obj clie
 
 // updateSyncStatus creates or updates the BMCSecretSyncStatus resource
 func (r *BMCSecretReconciler) updateSyncStatus(ctx context.Context, bmcSecretName string, backendPaths []configv1alpha1.BackendPath, totalPaths, successfulPaths, failedPaths int) error {
-	log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 
 	syncStatusName := fmt.Sprintf("%s-sync-status", bmcSecretName)
 	syncStatus := &configv1alpha1.BMCSecretSyncStatus{}
@@ -478,7 +524,7 @@ func (r *BMCSecretReconciler) updateSyncStatus(ctx context.Context, bmcSecretNam
 		}
 
 		if err := r.Create(ctx, syncStatus); err != nil {
-			log.Error(err, "Failed to create BMCSecretSyncStatus")
+			logger.Error(err, "Failed to create BMCSecretSyncStatus")
 			return err
 		}
 
@@ -530,7 +576,7 @@ func (r *BMCSecretReconciler) updateSyncStatus(ctx context.Context, bmcSecretNam
 	setCondition(&syncStatus.Status.Conditions, condition)
 
 	if err := r.Status().Update(ctx, syncStatus); err != nil {
-		log.Error(err, "Failed to update BMCSecretSyncStatus status")
+		logger.Error(err, "Failed to update BMCSecretSyncStatus status")
 		return err
 	}
 

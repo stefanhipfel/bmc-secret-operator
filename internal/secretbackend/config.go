@@ -23,6 +23,10 @@ import (
 	configv1alpha1 "github.com/ironcore-dev/bmc-secret-operator/api/v1alpha1"
 )
 
+const (
+	defaultBackendType = "vault"
+)
+
 // Config holds the backend configuration
 type Config struct {
 	Backend        string
@@ -117,7 +121,7 @@ func LoadConfigFromCRD(crdConfig *configv1alpha1.SecretBackendConfig) (*Config, 
 func LoadConfigFromEnv() (*Config, error) {
 	backend := os.Getenv("SECRET_BACKEND_TYPE")
 	if backend == "" {
-		backend = "vault"
+		backend = defaultBackendType
 	}
 
 	config := &Config{
@@ -128,7 +132,7 @@ func LoadConfigFromEnv() (*Config, error) {
 	}
 
 	switch backend {
-	case "vault":
+	case defaultBackendType:
 		config.VaultConfig = &VaultConfigInternal{
 			Address:            os.Getenv("VAULT_ADDR"),
 			AuthMethod:         getEnvOrDefault("VAULT_AUTH_METHOD", "kubernetes"),

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
 )
@@ -41,13 +42,19 @@ type Config struct {
 
 // VaultBackend implements the Backend interface for HashiCorp Vault
 type VaultBackend struct {
-	client    *vaultapi.Client
-	mountPath string
-	isKVv2    bool
+	client           *vaultapi.Client
+	mountPath        string
+	isKVv2           bool
+	metricsCollector MetricsCollector
+}
+
+// MetricsCollector defines the interface for recording metrics
+type MetricsCollector interface {
+	RecordAuth(method, backendType string, duration time.Duration, err error)
 }
 
 // NewVaultBackend creates a new Vault backend
-func NewVaultBackend(config *Config) (*VaultBackend, error) {
+func NewVaultBackend(config *Config, metricsCollector MetricsCollector) (*VaultBackend, error) {
 	// Create Vault client config
 	vaultConfig := vaultapi.DefaultConfig()
 	vaultConfig.Address = config.Address
@@ -76,9 +83,10 @@ func NewVaultBackend(config *Config) (*VaultBackend, error) {
 	}
 
 	backend := &VaultBackend{
-		client:    client,
-		mountPath: config.MountPath,
-		isKVv2:    true, // Default to KV v2
+		client:           client,
+		mountPath:        config.MountPath,
+		isKVv2:           true, // Default to KV v2
+		metricsCollector: metricsCollector,
 	}
 
 	// Authenticate
@@ -95,7 +103,7 @@ func NewVaultBackend(config *Config) (*VaultBackend, error) {
 }
 
 // WriteSecret writes a secret to Vault
-func (v *VaultBackend) WriteSecret(ctx context.Context, path string, data map[string]interface{}) error {
+func (v *VaultBackend) WriteSecret(ctx context.Context, path string, data map[string]any) error {
 	fullPath := v.buildPath(path)
 
 	var err error
@@ -115,7 +123,7 @@ func (v *VaultBackend) WriteSecret(ctx context.Context, path string, data map[st
 }
 
 // ReadSecret reads a secret from Vault
-func (v *VaultBackend) ReadSecret(ctx context.Context, path string) (map[string]interface{}, error) {
+func (v *VaultBackend) ReadSecret(ctx context.Context, path string) (map[string]any, error) {
 	fullPath := v.buildPath(path)
 
 	var secret *vaultapi.KVSecret

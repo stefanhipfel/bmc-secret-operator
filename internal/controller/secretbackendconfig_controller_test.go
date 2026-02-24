@@ -79,9 +79,11 @@ var _ = Describe("SecretBackendConfig Controller", func() {
 				WithObjects(backendConfig).
 				Build()
 
-			backendFactory, err := secretbackend.NewBackendFactory(k8sClient)
+			backendFactory, err := secretbackend.NewBackendFactory(k8sClient, nil)
 			Expect(err).NotTo(HaveOccurred())
-			defer backendFactory.Close()
+			defer func() {
+				Expect(backendFactory.Close()).To(Succeed())
+			}()
 
 			reconciler = &SecretBackendConfigReconciler{
 				Client:         k8sClient,
@@ -105,9 +107,11 @@ var _ = Describe("SecretBackendConfig Controller", func() {
 				WithScheme(scheme).
 				Build()
 
-			backendFactory, err := secretbackend.NewBackendFactory(k8sClient)
+			backendFactory, err := secretbackend.NewBackendFactory(k8sClient, nil)
 			Expect(err).NotTo(HaveOccurred())
-			defer backendFactory.Close()
+			defer func() {
+				Expect(backendFactory.Close()).To(Succeed())
+			}()
 
 			reconciler = &SecretBackendConfigReconciler{
 				Client:         k8sClient,
@@ -154,9 +158,11 @@ var _ = Describe("SecretBackendConfig Controller", func() {
 				WithObjects(backendConfig).
 				Build()
 
-			backendFactory, err := secretbackend.NewBackendFactory(k8sClient)
+			backendFactory, err := secretbackend.NewBackendFactory(k8sClient, nil)
 			Expect(err).NotTo(HaveOccurred())
-			defer backendFactory.Close()
+			defer func() {
+				Expect(backendFactory.Close()).To(Succeed())
+			}()
 
 			// Load initial config
 			regionKey, err := backendFactory.GetRegionLabelKey(ctx)

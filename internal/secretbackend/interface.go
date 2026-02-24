@@ -23,10 +23,10 @@ import (
 // Backend defines the interface for secret backend operations
 type Backend interface {
 	// WriteSecret writes a secret to the backend at the specified path
-	WriteSecret(ctx context.Context, path string, data map[string]interface{}) error
+	WriteSecret(ctx context.Context, path string, data map[string]any) error
 
 	// ReadSecret reads a secret from the backend at the specified path
-	ReadSecret(ctx context.Context, path string) (map[string]interface{}, error)
+	ReadSecret(ctx context.Context, path string) (map[string]any, error)
 
 	// DeleteSecret deletes a secret from the backend at the specified path
 	DeleteSecret(ctx context.Context, path string) error

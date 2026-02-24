@@ -37,6 +37,7 @@ import (
 
 	configv1alpha1 "github.com/ironcore-dev/bmc-secret-operator/api/v1alpha1"
 	"github.com/ironcore-dev/bmc-secret-operator/internal/controller"
+	"github.com/ironcore-dev/bmc-secret-operator/internal/metrics"
 	"github.com/ironcore-dev/bmc-secret-operator/internal/secretbackend"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -89,6 +90,10 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize metrics collector
+	metricsCollector := metrics.NewCollector()
+	setupLog.Info("metrics collector initialized")
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -182,12 +187,16 @@ func main() {
 	}
 
 	// Initialize backend factory
-	backendFactory, err := secretbackend.NewBackendFactory(mgr.GetClient())
+	backendFactory, err := secretbackend.NewBackendFactory(mgr.GetClient(), metricsCollector)
 	if err != nil {
 		setupLog.Error(err, "unable to create backend factory")
 		os.Exit(1)
 	}
-	defer backendFactory.Close()
+	defer func() {
+		if err := backendFactory.Close(); err != nil {
+			setupLog.Error(err, "failed to close backend factory")
+		}
+	}()
 
 	// Setup BMCSecret controller
 	if err = (&controller.BMCSecretReconciler{
@@ -195,6 +204,7 @@ func main() {
 		Scheme:         mgr.GetScheme(),
 		Recorder:       mgr.GetEventRecorderFor("bmcsecret-controller"),
 		BackendFactory: backendFactory,
+		Metrics:        metricsCollector,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BMCSecret")
 		os.Exit(1)

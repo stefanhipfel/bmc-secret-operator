@@ -19,6 +19,7 @@ package mock
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/ironcore-dev/bmc-secret-operator/internal/secretbackend"
@@ -27,7 +28,7 @@ import (
 // MockBackend implements a mock Backend for testing
 type MockBackend struct {
 	mu      sync.RWMutex
-	secrets map[string]map[string]interface{}
+	secrets map[string]map[string]any
 
 	// Track operations for testing
 	WriteSecretCalls  []WriteSecretCall
@@ -45,18 +46,18 @@ type MockBackend struct {
 
 type WriteSecretCall struct {
 	Path string
-	Data map[string]interface{}
+	Data map[string]any
 }
 
 // NewMockBackend creates a new mock backend
 func NewMockBackend() *MockBackend {
 	return &MockBackend{
-		secrets: make(map[string]map[string]interface{}),
+		secrets: make(map[string]map[string]any),
 	}
 }
 
 // WriteSecret writes a secret to the mock backend
-func (m *MockBackend) WriteSecret(ctx context.Context, path string, data map[string]interface{}) error {
+func (m *MockBackend) WriteSecret(ctx context.Context, path string, data map[string]any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -67,17 +68,15 @@ func (m *MockBackend) WriteSecret(ctx context.Context, path string, data map[str
 	}
 
 	// Deep copy data
-	dataCopy := make(map[string]interface{})
-	for k, v := range data {
-		dataCopy[k] = v
-	}
+	dataCopy := make(map[string]any)
+	maps.Copy(dataCopy, data)
 	m.secrets[path] = dataCopy
 
 	return nil
 }
 
 // ReadSecret reads a secret from the mock backend
-func (m *MockBackend) ReadSecret(ctx context.Context, path string) (map[string]interface{}, error) {
+func (m *MockBackend) ReadSecret(ctx context.Context, path string) (map[string]any, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -93,10 +92,8 @@ func (m *MockBackend) ReadSecret(ctx context.Context, path string) (map[string]i
 	}
 
 	// Deep copy data
-	dataCopy := make(map[string]interface{})
-	for k, v := range data {
-		dataCopy[k] = v
-	}
+	dataCopy := make(map[string]any)
+	maps.Copy(dataCopy, data)
 
 	return dataCopy, nil
 }
@@ -145,7 +142,7 @@ func (m *MockBackend) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.secrets = make(map[string]map[string]interface{})
+	m.secrets = make(map[string]map[string]any)
 	m.WriteSecretCalls = nil
 	m.ReadSecretCalls = nil
 	m.DeleteSecretCalls = nil

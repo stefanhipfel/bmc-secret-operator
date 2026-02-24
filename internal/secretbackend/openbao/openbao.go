@@ -41,12 +41,12 @@ func NewOpenBaoBackend(config *Config) (*OpenBaoBackend, error) {
 }
 
 // WriteSecret writes a secret to OpenBao
-func (o *OpenBaoBackend) WriteSecret(ctx context.Context, path string, data map[string]interface{}) error {
+func (o *OpenBaoBackend) WriteSecret(ctx context.Context, path string, data map[string]any) error {
 	return fmt.Errorf("OpenBao backend not yet implemented")
 }
 
 // ReadSecret reads a secret from OpenBao
-func (o *OpenBaoBackend) ReadSecret(ctx context.Context, path string) (map[string]interface{}, error) {
+func (o *OpenBaoBackend) ReadSecret(ctx context.Context, path string) (map[string]any, error) {
 	return nil, fmt.Errorf("OpenBao backend not yet implemented")
 }
 

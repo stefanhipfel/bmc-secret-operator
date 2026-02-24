@@ -33,6 +33,7 @@ rules:
   - config.metal.ironcore.dev
   resources:
   - bmcsecretsyncstatuses/status
+  - secretbackendconfigs/status
   verbs:
   - get
   - patch
