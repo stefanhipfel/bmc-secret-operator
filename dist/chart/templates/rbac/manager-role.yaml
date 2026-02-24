@@ -1,0 +1,70 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+    name: {{ include "bmc-secret-operator.resourceName" (dict "suffix" "manager-role" "context" $) }}
+rules:
+    - apiGroups:
+        - ""
+      resources:
+        - events
+      verbs:
+        - create
+        - patch
+    - apiGroups:
+        - ""
+      resources:
+        - secrets
+      verbs:
+        - get
+    - apiGroups:
+        - config.metal.ironcore.dev
+      resources:
+        - bmcsecretsyncstatuses
+      verbs:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+    - apiGroups:
+        - config.metal.ironcore.dev
+      resources:
+        - bmcsecretsyncstatuses/status
+        - secretbackendconfigs/status
+      verbs:
+        - get
+        - patch
+        - update
+    - apiGroups:
+        - config.metal.ironcore.dev
+      resources:
+        - secretbackendconfigs
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - metal.ironcore.dev
+      resources:
+        - bmcs
+        - bmcsecrets
+      verbs:
+        - get
+        - list
+        - watch
+    - apiGroups:
+        - metal.ironcore.dev
+      resources:
+        - bmcsecrets/finalizers
+      verbs:
+        - update
+    - apiGroups:
+        - metal.ironcore.dev
+      resources:
+        - bmcsecrets/status
+      verbs:
+        - get
+        - patch
+        - update

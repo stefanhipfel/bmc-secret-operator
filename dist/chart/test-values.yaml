@@ -1,0 +1,33 @@
+manager:
+  replicas: 2
+  image:
+    repository: ghcr.io/ironcore-dev/bmc-secret-operator
+    tag: v0.1.0
+    pullPolicy: IfNotPresent
+
+  env:
+    - name: SECRET_BACKEND_TYPE
+      value: vault
+    - name: VAULT_ADDR
+      value: https://vault.example.com:8200
+    - name: VAULT_AUTH_METHOD
+      value: kubernetes
+    - name: VAULT_ROLE
+      value: bmc-secret-operator
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 256Mi
+    requests:
+      cpu: 20m
+      memory: 128Mi
+
+rbacHelpers:
+  enable: true
+
+prometheus:
+  enable: true
+
+certManager:
+  enable: true
