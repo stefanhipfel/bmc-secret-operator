@@ -39,6 +39,7 @@ type BackendFactory struct {
 	pathBuilder      *PathBuilder
 	config           *Config
 	metricsCollector MetricsCollector
+	engineBackends   []*EngineBackend
 	mu               sync.RWMutex
 }
 
@@ -237,6 +238,101 @@ func newInstrumentedBackend(backend Backend, backendType string, collector Metri
 	}
 }
 
+// newInstrumentedBackendWithEngine wraps a backend with metrics instrumentation including engine name
+func newInstrumentedBackendWithEngine(backend Backend, backendType, engineName string, collector MetricsCollector) Backend {
+	return &instrumentedBackendWithEngine{
+		backend:     backend,
+		backendType: backendType,
+		engineName:  engineName,
+		collector:   collector,
+	}
+}
+
+// instrumentedBackendWithEngine wraps a Backend with metrics instrumentation including engine name
+type instrumentedBackendWithEngine struct {
+	backend     Backend
+	backendType string
+	engineName  string
+	collector   MetricsCollector
+}
+
+// WriteSecret writes a secret and records metrics
+func (i *instrumentedBackendWithEngine) WriteSecret(ctx context.Context, path string, data map[string]any) error {
+	start := time.Now()
+	err := i.backend.WriteSecret(ctx, path, data)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperationWithEngine(operation, backendType, engine string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperationWithEngine("write", i.backendType, i.engineName, duration, err)
+	} else if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("write", i.backendType, duration, err)
+	}
+	return err
+}
+
+// ReadSecret reads a secret and records metrics
+func (i *instrumentedBackendWithEngine) ReadSecret(ctx context.Context, path string) (map[string]any, error) {
+	start := time.Now()
+	data, err := i.backend.ReadSecret(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperationWithEngine(operation, backendType, engine string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperationWithEngine("read", i.backendType, i.engineName, duration, err)
+	} else if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("read", i.backendType, duration, err)
+	}
+	return data, err
+}
+
+// DeleteSecret deletes a secret and records metrics
+func (i *instrumentedBackendWithEngine) DeleteSecret(ctx context.Context, path string) error {
+	start := time.Now()
+	err := i.backend.DeleteSecret(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperationWithEngine(operation, backendType, engine string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperationWithEngine("delete", i.backendType, i.engineName, duration, err)
+	} else if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("delete", i.backendType, duration, err)
+	}
+	return err
+}
+
+// SecretExists checks if a secret exists and records metrics
+func (i *instrumentedBackendWithEngine) SecretExists(ctx context.Context, path string) (bool, error) {
+	start := time.Now()
+	exists, err := i.backend.SecretExists(ctx, path)
+	duration := time.Since(start)
+
+	if mc, ok := i.collector.(interface {
+		RecordBackendOperationWithEngine(operation, backendType, engine string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperationWithEngine("exists", i.backendType, i.engineName, duration, err)
+	} else if mc, ok := i.collector.(interface {
+		RecordBackendOperation(operation, backendType string, duration time.Duration, err error)
+	}); ok {
+		mc.RecordBackendOperation("exists", i.backendType, duration, err)
+	}
+	return exists, err
+}
+
+// Close closes the backend
+func (i *instrumentedBackendWithEngine) Close() error {
+	return i.backend.Close()
+}
+
 // instrumentedBackend wraps a Backend with metrics instrumentation
 type instrumentedBackend struct {
 	backend     Backend
@@ -334,9 +430,112 @@ func (f *BackendFactory) InvalidateCache() error {
 		f.backend = nil
 	}
 
+	// Close engine backends
+	for _, eb := range f.engineBackends {
+		if eb.Backend != nil {
+			if err := eb.Backend.Close(); err != nil {
+				return fmt.Errorf("failed to close engine backend %s: %w", eb.EngineName, err)
+			}
+		}
+	}
+	f.engineBackends = nil
+
 	// Clear cached config and path builder
 	f.config = nil
 	f.pathBuilder = nil
 
 	return nil
+}
+
+// GetEngineBackends returns engine backends that match the given labels
+// If no secret engines are configured, returns empty slice (backward compatibility)
+func (f *BackendFactory) GetEngineBackends(ctx context.Context, labels map[string]string) ([]*EngineBackend, error) {
+	f.mu.RLock()
+	if f.engineBackends != nil {
+		defer f.mu.RUnlock()
+		return f.filterEnginesByLabels(f.engineBackends, labels), nil
+	}
+	f.mu.RUnlock()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if f.engineBackends != nil {
+		return f.filterEnginesByLabels(f.engineBackends, labels), nil
+	}
+
+	// Load configuration if not already loaded
+	if f.config == nil {
+		config, err := f.loadConfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load configuration: %w", err)
+		}
+		f.config = config
+	}
+
+	// Check if multi-engine configuration exists
+	if f.config.VaultConfig == nil {
+		return nil, nil
+	}
+
+	// Get secret engines from CRD
+	var engines []configv1alpha1.SecretEngineConfig
+	var backendConfig configv1alpha1.SecretBackendConfig
+	err := f.client.Get(ctx, types.NamespacedName{Name: DefaultBackendConfigName}, &backendConfig)
+	if err != nil {
+		// No CRD config, return empty list
+		return nil, nil
+	}
+
+	if backendConfig.Spec.VaultConfig != nil {
+		engines = backendConfig.Spec.VaultConfig.SecretEngines
+	}
+
+	if len(engines) == 0 {
+		// No secret engines configured
+		return nil, nil
+	}
+
+	// Create engine backends
+	engineBackends, err := parseSecretEngineConfig(engines, f.config.VaultConfig, f.metricsCollector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse secret engine config: %w", err)
+	}
+
+	// Wrap each backend with metrics instrumentation
+	for _, eb := range engineBackends {
+		if f.metricsCollector != nil {
+			eb.Backend = newInstrumentedBackendWithEngine(eb.Backend, f.config.Backend, eb.EngineName, f.metricsCollector)
+		}
+	}
+
+	f.engineBackends = engineBackends
+	return f.filterEnginesByLabels(engineBackends, labels), nil
+}
+
+// filterEnginesByLabels filters engine backends by label matching
+func (f *BackendFactory) filterEnginesByLabels(engines []*EngineBackend, labels map[string]string) []*EngineBackend {
+	var matched []*EngineBackend
+	for _, engine := range engines {
+		if engine.MatchesLabels(labels) {
+			matched = append(matched, engine)
+		}
+	}
+	return matched
+}
+
+// HasMultiEngineConfig checks if multi-engine configuration is present
+func (f *BackendFactory) HasMultiEngineConfig(ctx context.Context) (bool, error) {
+	var backendConfig configv1alpha1.SecretBackendConfig
+	err := f.client.Get(ctx, types.NamespacedName{Name: DefaultBackendConfigName}, &backendConfig)
+	if err != nil {
+		return false, nil
+	}
+
+	if backendConfig.Spec.VaultConfig != nil {
+		return len(backendConfig.Spec.VaultConfig.SecretEngines) > 0, nil
+	}
+
+	return false, nil
 }

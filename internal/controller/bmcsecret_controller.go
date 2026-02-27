@@ -161,12 +161,39 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
+	// Check if multi-engine configuration exists
+	hasMultiEngine, err := r.BackendFactory.HasMultiEngineConfig(ctx)
+	if err != nil {
+		logger.Error(err, "Failed to check multi-engine configuration")
+		reconcileErr = err
+		return ctrl.Result{RequeueAfter: requeueAfterError}, err
+	}
+
+	if hasMultiEngine {
+		// Use multi-engine sync path
+		return r.reconcileMultiEngine(ctx, &bmcSecret, bmcs, username, password, &reconcileErr)
+	}
+
+	// Fall back to single-engine path for backward compatibility
+	return r.reconcileSingleEngine(ctx, &bmcSecret, bmcs, username, password, &reconcileErr)
+}
+
+// reconcileSingleEngine handles reconciliation for single-engine configuration (backward compatibility)
+func (r *BMCSecretReconciler) reconcileSingleEngine(
+	ctx context.Context,
+	bmcSecret *metalv1alpha1.BMCSecret,
+	bmcs []metalv1alpha1.BMC,
+	username, password string,
+	reconcileErr *error,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
 	// Get backend
 	backend, err := r.BackendFactory.GetBackend(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get backend")
-		r.Recorder.Event(&bmcSecret, "Warning", "BackendUnavailable", err.Error())
-		reconcileErr = err
+		r.Recorder.Event(bmcSecret, "Warning", "BackendUnavailable", err.Error())
+		*reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
@@ -174,7 +201,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	pathBuilder, err := r.BackendFactory.GetPathBuilder(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get path builder")
-		reconcileErr = err
+		*reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
@@ -182,7 +209,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	regionLabelKey, err := r.BackendFactory.GetRegionLabelKey(ctx)
 	if err != nil {
 		logger.Error(err, "Failed to get region label key")
-		reconcileErr = err
+		*reconcileErr = err
 		return ctrl.Result{RequeueAfter: requeueAfterError}, err
 	}
 
@@ -259,7 +286,7 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 		if err := backend.WriteSecret(ctx, path, secretData); err != nil {
 			logger.Error(err, "Failed to write secret to backend", "path", path)
-			r.Recorder.Eventf(&bmcSecret, "Warning", "SyncFailed", "Failed to sync to %s: %v", path, err)
+			r.Recorder.Eventf(bmcSecret, "Warning", "SyncFailed", "Failed to sync to %s: %v", path, err)
 			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
 				Path:         path,
 				BMCName:      bmc.Name,
@@ -295,12 +322,174 @@ func (r *BMCSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Update status
 	if syncErrors > 0 {
-		r.Recorder.Eventf(&bmcSecret, "Warning", "PartialSync", "Synced %d/%d secrets", syncSuccess, len(bmcs))
+		r.Recorder.Eventf(bmcSecret, "Warning", "PartialSync", "Synced %d/%d secrets", syncSuccess, len(bmcs))
 	} else {
-		r.Recorder.Eventf(&bmcSecret, "Normal", "Synced", "Successfully synced to %d backend paths", syncSuccess)
+		r.Recorder.Eventf(bmcSecret, "Normal", "Synced", "Successfully synced to %d backend paths", syncSuccess)
 	}
 
 	logger.Info("Reconciliation complete", "syncSuccess", syncSuccess, "syncErrors", syncErrors, "totalBMCs", len(bmcs))
+
+	if r.Metrics != nil {
+		r.Metrics.RecordSyncStatus(bmcSecret.Name, syncSuccess, syncErrors, syncTime.Time)
+	}
+
+	return ctrl.Result{RequeueAfter: requeueAfterNormal}, nil
+}
+
+// reconcileMultiEngine handles reconciliation for multi-engine configuration
+func (r *BMCSecretReconciler) reconcileMultiEngine(
+	ctx context.Context,
+	bmcSecret *metalv1alpha1.BMCSecret,
+	bmcs []metalv1alpha1.BMC,
+	username, password string,
+	reconcileErr *error,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Get region label key
+	regionLabelKey, err := r.BackendFactory.GetRegionLabelKey(ctx)
+	if err != nil {
+		logger.Error(err, "Failed to get region label key")
+		*reconcileErr = err
+		return ctrl.Result{RequeueAfter: requeueAfterError}, err
+	}
+
+	// Get matching engine backends based on BMCSecret labels
+	engineBackends, err := r.BackendFactory.GetEngineBackends(ctx, bmcSecret.Labels)
+	if err != nil {
+		logger.Error(err, "Failed to get engine backends")
+		r.Recorder.Event(bmcSecret, "Warning", "BackendUnavailable", err.Error())
+		*reconcileErr = err
+		return ctrl.Result{RequeueAfter: requeueAfterError}, err
+	}
+
+	if len(engineBackends) == 0 {
+		logger.Info("No matching secret engines found for BMCSecret labels", "labels", bmcSecret.Labels)
+		r.Recorder.Event(bmcSecret, "Normal", "NoMatchingEngines", "No secret engines match this BMCSecret's labels")
+		return ctrl.Result{RequeueAfter: requeueAfterNormal}, nil
+	}
+
+	logger.Info("Found matching secret engines", "count", len(engineBackends))
+
+	// Sync to all matching engines
+	syncErrors := 0
+	syncSuccess := 0
+	backendPaths := make([]configv1alpha1.BackendPath, 0, len(bmcs)*len(engineBackends))
+	syncTime := metav1.Now()
+
+	secretData := map[string]any{
+		"username": username,
+		"password": password,
+	}
+
+	for _, engineBackend := range engineBackends {
+		logger.Info("Syncing to engine", "engine", engineBackend.EngineName)
+
+		for _, bmc := range bmcs {
+			region := bmcresolver.ExtractRegionFromBMC(&bmc, regionLabelKey)
+			hostname := bmcresolver.GetHostnameFromBMC(&bmc)
+
+			// Build path using engine's path builder
+			path, err := engineBackend.PathBuilder.Build(secretbackend.PathVariables{
+				Region:   region,
+				Hostname: hostname,
+				Username: username,
+			})
+			if err != nil {
+				logger.Error(err, "Failed to build path", "bmc", bmc.Name, "engine", engineBackend.EngineName)
+				backendPaths = append(backendPaths, configv1alpha1.BackendPath{
+					Path:         path,
+					BMCName:      bmc.Name,
+					Region:       region,
+					Hostname:     hostname,
+					Username:     username,
+					LastSyncTime: syncTime,
+					SyncStatus:   "Failed",
+					ErrorMessage: fmt.Sprintf("[%s] %s", engineBackend.EngineName, err.Error()),
+				})
+				syncErrors++
+				continue
+			}
+
+			// Check if update needed
+			needsUpdate, err := r.needsUpdate(ctx, engineBackend.Backend, path, password)
+			if err != nil {
+				logger.Error(err, "Failed to check if update needed", "path", path, "engine", engineBackend.EngineName)
+				backendPaths = append(backendPaths, configv1alpha1.BackendPath{
+					Path:         path,
+					BMCName:      bmc.Name,
+					Region:       region,
+					Hostname:     hostname,
+					Username:     username,
+					LastSyncTime: syncTime,
+					SyncStatus:   "Failed",
+					ErrorMessage: fmt.Sprintf("[%s] %s", engineBackend.EngineName, err.Error()),
+				})
+				syncErrors++
+				continue
+			}
+
+			if !needsUpdate {
+				logger.V(1).Info("Secret already up to date", "path", path, "engine", engineBackend.EngineName)
+				backendPaths = append(backendPaths, configv1alpha1.BackendPath{
+					Path:         path,
+					BMCName:      bmc.Name,
+					Region:       region,
+					Hostname:     hostname,
+					Username:     username,
+					LastSyncTime: syncTime,
+					SyncStatus:   "Success",
+				})
+				syncSuccess++
+				continue
+			}
+
+			// Write to backend
+			if err := engineBackend.Backend.WriteSecret(ctx, path, secretData); err != nil {
+				logger.Error(err, "Failed to write secret to backend", "path", path, "engine", engineBackend.EngineName)
+				r.Recorder.Eventf(bmcSecret, "Warning", "SyncFailed", "Failed to sync to %s (engine %s): %v", path, engineBackend.EngineName, err)
+				backendPaths = append(backendPaths, configv1alpha1.BackendPath{
+					Path:         path,
+					BMCName:      bmc.Name,
+					Region:       region,
+					Hostname:     hostname,
+					Username:     username,
+					LastSyncTime: syncTime,
+					SyncStatus:   "Failed",
+					ErrorMessage: fmt.Sprintf("[%s] %s", engineBackend.EngineName, err.Error()),
+				})
+				syncErrors++
+				continue
+			}
+
+			logger.Info("Successfully synced secret", "path", path, "engine", engineBackend.EngineName)
+			backendPaths = append(backendPaths, configv1alpha1.BackendPath{
+				Path:         path,
+				BMCName:      bmc.Name,
+				Region:       region,
+				Hostname:     hostname,
+				Username:     username,
+				LastSyncTime: syncTime,
+				SyncStatus:   "Success",
+			})
+			syncSuccess++
+		}
+	}
+
+	// Update BMCSecretSyncStatus
+	if err := r.updateSyncStatus(ctx, bmcSecret.Name, backendPaths, len(backendPaths), syncSuccess, syncErrors); err != nil {
+		logger.Error(err, "Failed to update sync status")
+		// Don't fail reconciliation if status update fails
+	}
+
+	// Update status
+	if syncErrors > 0 {
+		r.Recorder.Eventf(bmcSecret, "Warning", "PartialSync", "Synced %d/%d secrets across %d engines", syncSuccess, len(backendPaths), len(engineBackends))
+	} else {
+		r.Recorder.Eventf(bmcSecret, "Normal", "Synced", "Successfully synced to %d backend paths across %d engines", syncSuccess, len(engineBackends))
+	}
+
+	logger.Info("Multi-engine reconciliation complete", "syncSuccess", syncSuccess, "syncErrors", syncErrors, "totalPaths", len(backendPaths), "engines", len(engineBackends))
 
 	if r.Metrics != nil {
 		r.Metrics.RecordSyncStatus(bmcSecret.Name, syncSuccess, syncErrors, syncTime.Time)

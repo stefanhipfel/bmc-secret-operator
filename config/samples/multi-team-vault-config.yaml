@@ -1,0 +1,47 @@
+apiVersion: config.metal.ironcore.dev/v1alpha1
+kind: SecretBackendConfig
+metadata:
+  name: multi-team-backend-config
+spec:
+  backend: vault
+  vaultConfig:
+    address: "https://vault.example.com:8200"
+    authMethod: kubernetes
+    kubernetesAuth:
+      role: bmc-secret-operator
+      path: kubernetes
+    # Default mount path (can be overridden per secret engine)
+    mountPath: secret
+    tlsConfig:
+      skipVerify: false
+    # Configure multiple secret engines for different teams
+    secretEngines:
+      # Team A - Production BMCs
+      - name: team-a-prod
+        mountPath: team-a/secret
+        pathTemplate: "prod/bmc/{{.Region}}/{{.Hostname}}/{{.Username}}"
+        syncLabel: "team=a"
+
+      # Team B - Development BMCs
+      - name: team-b-dev
+        mountPath: team-b/secret
+        pathTemplate: "dev/bmc/{{.Region}}/{{.Hostname}}/{{.Username}}"
+        syncLabel: "team=b"
+
+      # Shared infrastructure BMCs
+      - name: shared-infra
+        mountPath: shared/secret
+        pathTemplate: "infra/{{.Region}}/{{.Hostname}}/{{.Username}}"
+        syncLabel: "infra=shared"
+
+      # Special handling for critical systems (match any value)
+      - name: critical-systems
+        mountPath: critical/secret
+        pathTemplate: "critical/{{.Region}}/{{.Hostname}}/{{.Username}}"
+        syncLabel: "critical"
+
+  # Global settings
+  pathTemplate: "bmc/{{.Region}}/{{.Hostname}}/{{.Username}}"
+  regionLabelKey: "region"
+  # Global sync label (if specified, BMCSecrets must have this AND the engine-specific label)
+  syncLabel: "bmc-secret-operator.metal.ironcore.dev/sync"

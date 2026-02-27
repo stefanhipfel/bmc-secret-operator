@@ -177,11 +177,15 @@ func (m *MockBackend) GetSecretCount() int {
 
 // MockBackendFactory creates a factory that returns the mock backend
 type MockBackendFactory struct {
-	Backend        *MockBackend
-	PathBuilder    *secretbackend.PathBuilder
-	RegionLabelKey string
-	SyncLabel      string
-	GetBackendErr  error
+	Backend          *MockBackend
+	PathBuilder      *secretbackend.PathBuilder
+	RegionLabelKey   string
+	SyncLabel        string
+	GetBackendErr    error
+	EngineBackends   []*secretbackend.EngineBackend
+	HasMultiEngine   bool
+	MultiEngineErr   error
+	EngineBackendErr error
 }
 
 func NewMockBackendFactory(mockBackend *MockBackend, pathTemplate, regionLabelKey, syncLabel string) (*MockBackendFactory, error) {
@@ -224,4 +228,18 @@ func (m *MockBackendFactory) Close() error {
 func (m *MockBackendFactory) InvalidateCache() error {
 	// No-op for mock - config changes are handled by updating the mock fields directly
 	return nil
+}
+
+func (m *MockBackendFactory) GetEngineBackends(ctx context.Context, labels map[string]string) ([]*secretbackend.EngineBackend, error) {
+	if m.EngineBackendErr != nil {
+		return nil, m.EngineBackendErr
+	}
+	return m.EngineBackends, nil
+}
+
+func (m *MockBackendFactory) HasMultiEngineConfig(ctx context.Context) (bool, error) {
+	if m.MultiEngineErr != nil {
+		return false, m.MultiEngineErr
+	}
+	return m.HasMultiEngine, nil
 }

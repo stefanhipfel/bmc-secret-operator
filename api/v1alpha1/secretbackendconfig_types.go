@@ -83,6 +83,40 @@ type VaultConfig struct {
 	// TLSConfig contains TLS configuration
 	// +optional
 	TLSConfig *TLSConfig `json:"tlsConfig,omitempty"`
+
+	// SecretEngines contains a list of secret engine configurations for different teams/purposes
+	// Each entry can specify a different mount path, path template, and sync label
+	// +optional
+	SecretEngines []SecretEngineConfig `json:"secretEngines,omitempty"`
+}
+
+// SecretEngineConfig defines configuration for a specific secret engine/team
+type SecretEngineConfig struct {
+	// Name is a descriptive name for this secret engine configuration (e.g., "team-a", "prod-bmcs")
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// MountPath is the KV secrets engine mount path for this configuration
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	MountPath string `json:"mountPath"`
+
+	// PathTemplate is the template string for building secret paths
+	// Available variables: {{.Region}}, {{.Hostname}}, {{.Username}}
+	// +kubebuilder:default="bmc/{{.Region}}/{{.Hostname}}/{{.Username}}"
+	// +optional
+	PathTemplate string `json:"pathTemplate,omitempty"`
+
+	// SyncLabel is the label key that must be present on BMCSecrets to sync to this engine
+	// Format: key or key=value. If only key is specified, any value matches.
+	// Example: "team=a" will match BMCSecrets with label team=a
+	// Example: "sync-to-vault" will match BMCSecrets with any value for sync-to-vault label
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	SyncLabel string `json:"syncLabel"`
 }
 
 // KubernetesAuthConfig defines Kubernetes authentication configuration

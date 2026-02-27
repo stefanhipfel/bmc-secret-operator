@@ -223,6 +223,17 @@ func (c *Collector) RecordBackendOperation(operation, backendType string, durati
 	c.backendOpTotal.WithLabelValues(operation, backendType, result).Inc()
 }
 
+// RecordBackendOperationWithEngine records a backend operation with engine label
+func (c *Collector) RecordBackendOperationWithEngine(operation, backendType, engine string, duration time.Duration, err error) {
+	// Use existing metrics but add engine as part of backend type for now
+	// This is backward compatible - we append engine name to backend type
+	backendLabel := backendType
+	if engine != "" {
+		backendLabel = backendType + ":" + engine
+	}
+	c.RecordBackendOperation(operation, backendLabel, duration, err)
+}
+
 // recordBackendError records backend error details
 func (c *Collector) recordBackendError(operation, backendType string, err error) {
 	errorType := classifyError(err)

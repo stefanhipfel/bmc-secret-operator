@@ -52,6 +52,12 @@ type BackendFactoryInterface interface {
 	// GetSyncLabel returns the configured sync label key
 	GetSyncLabel(ctx context.Context) (string, error)
 
+	// GetEngineBackends returns engine backends that match the given labels
+	GetEngineBackends(ctx context.Context, labels map[string]string) ([]*EngineBackend, error)
+
+	// HasMultiEngineConfig checks if multi-engine configuration is present
+	HasMultiEngineConfig(ctx context.Context) (bool, error)
+
 	// InvalidateCache invalidates cached configuration and backend
 	InvalidateCache() error
 

@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	configv1alpha1 "github.com/ironcore-dev/bmc-secret-operator/api/v1alpha1"
+	"github.com/ironcore-dev/bmc-secret-operator/internal/secretbackend"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -766,6 +767,237 @@ var _ = Describe("BMCSecret Controller", func() {
 			Expect(syncStatus.Status.BackendPaths).To(HaveLen(1))
 			Expect(syncStatus.Status.BackendPaths[0].SyncStatus).To(Equal("Failed"))
 			Expect(syncStatus.Status.BackendPaths[0].ErrorMessage).To(ContainSubstring("backend connection failed"))
+		})
+	})
+})
+
+var _ = Describe("BMCSecret Multi-Engine Controller", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	Context("Single engine label match", func() {
+		It("Should match engine with exact label value", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:         "team-a",
+					MountPath:    "secret",
+					PathTemplate: "bmc/team-a/{{.Region}}/{{.Hostname}}/{{.Username}}",
+					SyncLabel:    "team=a",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels := map[string]string{"team": "a"}
+			matchingEngines, err := multiEngineFactory.GetMatchingEngines(ctx, labels)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matchingEngines).To(HaveLen(1))
+			Expect(matchingEngines[0].Name).To(Equal("team-a"))
+		})
+	})
+
+	Context("Multiple engine label matches", func() {
+		It("Should match all matching engines", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "team-a",
+					MountPath: "team-a-secret",
+					SyncLabel: "team=a",
+				},
+				{
+					Name:      "critical-prod",
+					MountPath: "critical-secret",
+					SyncLabel: "critical=true",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels := map[string]string{"team": "a", "critical": "true"}
+			matchingEngines, err := multiEngineFactory.GetMatchingEngines(ctx, labels)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matchingEngines).To(HaveLen(2))
+		})
+	})
+
+	Context("Label matching - exact vs any value", func() {
+		It("Should match exact label values (key=value)", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "exact-match",
+					MountPath: "secret",
+					SyncLabel: "env=prod",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels1 := map[string]string{"env": "prod"}
+			matching, err := multiEngineFactory.GetMatchingEngines(ctx, labels1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(HaveLen(1))
+
+			labels2 := map[string]string{"env": "dev"}
+			matching, err = multiEngineFactory.GetMatchingEngines(ctx, labels2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(BeEmpty())
+		})
+
+		It("Should match any value for key-only labels", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "any-value-match",
+					MountPath: "secret",
+					SyncLabel: "sync-enabled",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels1 := map[string]string{"sync-enabled": "true"}
+			matching, err := multiEngineFactory.GetMatchingEngines(ctx, labels1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(HaveLen(1))
+
+			labels2 := map[string]string{"sync-enabled": "yes"}
+			matching, err = multiEngineFactory.GetMatchingEngines(ctx, labels2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(HaveLen(1))
+
+			labels3 := map[string]string{"other-label": "value"}
+			matching, err = multiEngineFactory.GetMatchingEngines(ctx, labels3)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(BeEmpty())
+		})
+	})
+
+	Context("Global syncLabel filtering", func() {
+		It("Should require global syncLabel when configured", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "team-a",
+					MountPath: "secret",
+					SyncLabel: "team=a",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "globally-sync", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels := map[string]string{"team": "a", "globally-sync": "true"}
+			matching, err := multiEngineFactory.GetMatchingEngines(ctx, labels)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(HaveLen(1))
+
+			labels2 := map[string]string{"team": "a"}
+			matching, err = multiEngineFactory.GetMatchingEngines(ctx, labels2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matching).To(BeEmpty())
+		})
+	})
+
+	Context("Path templates per engine", func() {
+		It("Should apply different path templates for each engine", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:         "team-a",
+					MountPath:    "secret-a",
+					PathTemplate: "team-a/{{.Region}}/{{.Hostname}}/{{.Username}}",
+					SyncLabel:    "team=a",
+				},
+				{
+					Name:         "team-b",
+					MountPath:    "secret-b",
+					PathTemplate: "prod/{{.Region}}/bmc/{{.Hostname}}/user-{{.Username}}",
+					SyncLabel:    "team=b",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			builderA, err := multiEngineFactory.GetPathBuilderForEngine(ctx, "team-a")
+			Expect(err).NotTo(HaveOccurred())
+
+			pathA, err := builderA.Build(secretbackend.PathVariables{
+				Region:   "us-east-1",
+				Hostname: "server1.com",
+				Username: "admin",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pathA).To(Equal("team-a/us-east-1/server1.com/admin"))
+		})
+	})
+
+	Context("Mount paths per engine", func() {
+		It("Should track different mount paths for each engine", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "team-a",
+					MountPath: "kv-team-a",
+					SyncLabel: "team=a",
+				},
+				{
+					Name:      "team-b",
+					MountPath: "kv-team-b",
+					SyncLabel: "team=b",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			allEngines, err := multiEngineFactory.GetSecretEngines(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(allEngines).To(HaveLen(2))
+		})
+	})
+
+	Context("Error isolation between engines", func() {
+		It("Should continue syncing if one engine fails", func() {
+			engines := []configv1alpha1.SecretEngineConfig{
+				{
+					Name:      "backend-1",
+					MountPath: "secret",
+					SyncLabel: "env=prod",
+				},
+				{
+					Name:      "backend-2",
+					MountPath: "secret",
+					SyncLabel: "env=prod",
+				},
+			}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			backendMock1 := multiEngineFactory.GetMockBackendForEngine("backend-1")
+			backendMock1.WriteError = fmt.Errorf("connection error")
+
+			labels := map[string]string{"env": "prod"}
+			matchingEngines, err := multiEngineFactory.GetMatchingEngines(ctx, labels)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matchingEngines).To(HaveLen(2))
+
+			backendMock2 := multiEngineFactory.GetMockBackendForEngine("backend-2")
+			err = backendMock2.WriteSecret(ctx, "backend2/us-east-1/bmc-server/admin", map[string]any{
+				"username": "admin",
+				"password": "secret123",
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(backendMock2.GetWriteCallCount()).To(Equal(1))
+		})
+	})
+
+	Context("Backward compatibility", func() {
+		It("Should work with no engines configured", func() {
+			engines := []configv1alpha1.SecretEngineConfig{}
+			multiEngineFactory, err := mock.NewMultiEngineBackendFactory(engines, "", "region")
+			Expect(err).NotTo(HaveOccurred())
+
+			labels := map[string]string{"any": "label"}
+			matchingEngines, err := multiEngineFactory.GetMatchingEngines(ctx, labels)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(matchingEngines).To(BeEmpty())
 		})
 	})
 })

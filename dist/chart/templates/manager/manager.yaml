@@ -10,7 +10,7 @@ metadata:
     name: {{ include "bmc-secret-operator.resourceName" (dict "suffix" "controller-manager" "context" $) }}
     namespace: {{ .Release.Namespace }}
 spec:
-    replicas: {{ .Values.manager.replicas }}
+    replicas: 1
     selector:
         matchLabels:
             app.kubernetes.io/name: {{ include "bmc-secret-operator.name" . }}
@@ -35,9 +35,6 @@ spec:
             {{- with .Values.manager.nodeSelector }}
             nodeSelector: {{ toYaml . | nindent 16 }}
             {{- end }}
-            {{- with .Values.manager.imagePullSecrets }}
-            imagePullSecrets: {{ toYaml . | nindent 14 }}
-            {{- end }}
             containers:
                 - args:
                     {{- if .Values.metrics.enable }}
@@ -50,15 +47,8 @@ spec:
                     {{- range .Values.manager.args }}
                     - {{ . }}
                     {{- end }}
-                    {{- if .Values.certManager.enable }}
-                    - --metrics-cert-path=/tmp/k8s-metrics-server/metrics-certs
-                    {{- end }}
                   command:
                     - /manager
-                  {{- with .Values.manager.env }}
-                  env:
-                    {{- toYaml . | nindent 20 }}
-                  {{- end }}
                   image: "{{ .Values.manager.image.repository }}:{{ .Values.manager.image.tag }}"
                   imagePullPolicy: {{ .Values.manager.image.pullPolicy }}
                   livenessProbe:
@@ -87,12 +77,7 @@ spec:
                     {{- else }}
                     {}
                     {{- end }}
-                  {{- if .Values.certManager.enable }}
-                  volumeMounts:
-                  - mountPath: /tmp/k8s-metrics-server/metrics-certs
-                    name: metrics-certs
-                    readOnly: true
-                  {{- end }}
+                  volumeMounts: []
             securityContext:
               {{- if .Values.manager.podSecurityContext }}
               {{- toYaml .Values.manager.podSecurityContext | nindent 14 }}
@@ -101,17 +86,4 @@ spec:
               {{- end }}
             serviceAccountName: {{ include "bmc-secret-operator.resourceName" (dict "suffix" "controller-manager" "context" $) }}
             terminationGracePeriodSeconds: 10
-            {{- if .Values.certManager.enable }}
-            volumes:
-            - name: metrics-certs
-              secret:
-                secretName: metrics-server-cert
-                optional: false
-                items:
-                  - key: ca.crt
-                    path: ca.crt
-                  - key: tls.crt
-                    path: tls.crt
-                  - key: tls.key
-                    path: tls.key
-            {{- end }}
+            volumes: []
